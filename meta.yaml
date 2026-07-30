@@ -1,0 +1,21 @@
+name: klag-exporter
+version: 0.1.26-cx0.1
+deployable_type: image
+ibm_dockerfile: Dockerfile
+lifecycle_status: production
+cx_metadata:
+  cx_feature_id: core
+  cx_service_rnd_owner_id: core
+code_language: rust
+test_image_name: internal/rust
+test_image_tag: slim-bookworm
+tests: true
+extra_test_args:
+  - "--locked"
+extra_test_commands:
+  cargo-clippy:
+    command: ["cargo"]
+    args: ["clippy", "--all-targets", "--", "-Dwarnings"]
+  cargo-fmt:
+    command: ["cargo"]
+    args: ["fmt", "--all", "--check"]
