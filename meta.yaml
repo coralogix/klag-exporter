@@ -1,3 +1,4 @@
+platform_features_version: v2
 name: klag-exporter
 version: 0.1.26-cx0.1
 deployable_type: image
