@@ -48,13 +48,21 @@ impl HttpServer {
     }
 
     pub async fn run(self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
+        let heap_profile_routes = Router::new()
+            .route("/heap_profile", cx_heap_profile::heap_profile_route())
+            .route(
+                "/heap_profile/flamegraph",
+                cx_heap_profile::flamegraph_route(),
+            );
+
         let app = Router::new()
             .route("/metrics", get(metrics_handler))
             .route("/health", get(health_handler))
             .route("/ready", get(ready_handler))
             .route("/leader", get(leader_handler))
             .route("/", get(root_handler))
-            .with_state(self.state);
+            .with_state(self.state)
+            .merge(heap_profile_routes);
 
         info!(addr = %self.addr, "Starting HTTP server");
 
@@ -136,6 +144,7 @@ async fn root_handler() -> Response {
 <p><a href="/health">Health</a></p>
 <p><a href="/ready">Ready</a></p>
 <p><a href="/leader">Leader Status</a></p>
+<p><a href="/heap_profile/flamegraph">Heap Profile Flamegraph</a></p>
 </body>
 </html>"#;
 
