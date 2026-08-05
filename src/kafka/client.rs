@@ -291,8 +291,30 @@ impl KafkaClient {
         }
 
         let admin = self.admin();
-        let lows = list_offsets_batched(&admin, partitions, OffsetSpec::Earliest, self.timeout)?;
-        let highs = list_offsets_batched(&admin, partitions, OffsetSpec::Latest, self.timeout)?;
+        let timeout = self.timeout;
+        // EARLIEST and LATEST are independent requests over the same
+        // partition set — run them concurrently instead of back-to-back.
+        // librdkafka admin clients are safe to call from multiple threads.
+        let (lows, highs) = std::thread::scope(|scope| {
+            let lows_handle = scope
+                .spawn(|| list_offsets_batched(&admin, partitions, OffsetSpec::Earliest, timeout));
+            let highs_handle = scope
+                .spawn(|| list_offsets_batched(&admin, partitions, OffsetSpec::Latest, timeout));
+            (
+                lows_handle.join().unwrap_or_else(|e| {
+                    Err(KlagError::Admin(format!(
+                        "EARLIEST watermark thread panicked: {e:?}"
+                    )))
+                }),
+                highs_handle.join().unwrap_or_else(|e| {
+                    Err(KlagError::Admin(format!(
+                        "LATEST watermark thread panicked: {e:?}"
+                    )))
+                }),
+            )
+        });
+        let lows = lows?;
+        let highs = highs?;
 
         let mut merged = HashMap::with_capacity(partitions.len());
         for (tp, high) in highs {
