@@ -3,6 +3,7 @@ use crate::error::{KlagError, Result};
 use crate::kafka::client::TopicPartition;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
+use rdkafka::error::KafkaError;
 use rdkafka::message::Message;
 use rdkafka::Offset;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,10 +12,12 @@ use std::time::Duration;
 use tracing::{debug, instrument, warn};
 
 /// Result of fetching a timestamp from Kafka
-#[derive(Debug, Clone)]
-pub struct TimestampFetchResult {
-    /// The timestamp in milliseconds
-    pub timestamp_ms: i64,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimestampFetchResult {
+    /// Timestamp in milliseconds of the first readable record at/after the offset
+    Timestamp(i64),
+    /// Reached end of partition before any readable record
+    CaughtUp,
 }
 
 /// Pool-based timestamp consumer. Maintains a pool of reusable `BaseConsumers`
@@ -75,6 +78,8 @@ impl TimestampConsumer {
             )
             .set("enable.auto.commit", "false")
             .set("auto.offset.reset", "earliest")
+            // Signal end-of-partition so a caught-up group is distinguishable from a fetch timeout
+            .set("enable.partition.eof", "true")
             // Small fetch size for timestamp sampling
             .set("fetch.max.bytes", "1048576")
             .set("max.partition.fetch.bytes", "262144")
@@ -177,7 +182,16 @@ impl TimestampConsumer {
                         "Fetched message timestamp"
                     );
 
-                    Ok(timestamp.map(|ts| TimestampFetchResult { timestamp_ms: ts }))
+                    Ok(timestamp.map(TimestampFetchResult::Timestamp))
+                }
+                Err(KafkaError::PartitionEOF(_)) => {
+                    debug!(
+                        topic = %tp.topic,
+                        partition = tp.partition,
+                        offset = offset,
+                        "Reached end of partition with no readable record"
+                    );
+                    Ok(Some(TimestampFetchResult::CaughtUp))
                 }
                 Err(e) => {
                     warn!(
