@@ -23,6 +23,7 @@ use crate::collector::offset_collector::OffsetsSnapshot;
 use crate::collector::rate_sampler::RateSampler;
 use crate::error::Result;
 use crate::kafka::client::TopicPartition;
+use crate::kafka::consumer::TimestampFetchResult;
 use crate::kafka::TimestampConsumer;
 use dashmap::DashMap;
 use futures::future::join_all;
@@ -74,28 +75,29 @@ impl MessageSampler {
         group_id: &str,
         tp: &TopicPartition,
         offset: i64,
-    ) -> Result<Option<i64>> {
+    ) -> Result<Option<TimestampFetchResult>> {
         let key = (group_id.to_string(), tp.clone());
 
         // Cache hit if TTL not exceeded AND offset unchanged (consumer didn't move).
         if let Some(cached) = self.inner.cache.get(&key) {
             if cached.cached_at.elapsed() < self.inner.cache_ttl && cached.offset == offset {
-                return Ok(Some(cached.timestamp_ms));
+                return Ok(Some(TimestampFetchResult::Timestamp(cached.timestamp_ms)));
             }
         }
 
         let fetch_result = self.inner.consumer.fetch_timestamp(tp, offset)?;
-        if let Some(ref ts) = fetch_result {
+        // CaughtUp is not cached: new records may land at this offset before the TTL expires.
+        if let Some(TimestampFetchResult::Timestamp(ts)) = fetch_result {
             self.inner.cache.insert(
                 key,
                 CachedTimestamp {
-                    timestamp_ms: ts.timestamp_ms,
+                    timestamp_ms: ts,
                     offset,
                     cached_at: Instant::now(),
                 },
             );
         }
-        Ok(fetch_result.map(|r| r.timestamp_ms))
+        Ok(fetch_result)
     }
 
     fn recycle_pool(&self) -> Result<()> {
@@ -183,6 +185,7 @@ impl TimestampSampler {
                 compute_time_lags_message(
                     s,
                     snapshot,
+                    now_ms,
                     max_concurrent_fetches,
                     skip_data_loss_partitions,
                 )
@@ -278,6 +281,7 @@ fn build_fetch_requests(
 async fn compute_time_lags_message(
     sampler: &MessageSampler,
     snapshot: &OffsetsSnapshot,
+    now_ms: i64,
     max_concurrent_fetches: usize,
     skip_data_loss_partitions: bool,
 ) -> HashMap<(String, TopicPartition), TimestampData> {
@@ -314,11 +318,15 @@ async fn compute_time_lags_message(
     let mut out = HashMap::new();
     for result in results {
         match result {
-            Ok(Ok(((group_id, tp), Ok(Some(ts))))) => {
-                out.insert((group_id, tp), TimestampData { timestamp_ms: ts });
+            Ok(Ok(((group_id, tp), Ok(Some(fetched))))) => {
+                let timestamp_ms = match fetched {
+                    TimestampFetchResult::Timestamp(ts) => ts,
+                    TimestampFetchResult::CaughtUp => now_ms,
+                };
+                out.insert((group_id, tp), TimestampData { timestamp_ms });
             }
             Ok(Ok(((_group_id, _tp), Ok(None)))) => {
-                // No message available at offset; skip.
+                // Fetch timed out or record had no timestamp: time lag unknown, skip.
             }
             Ok(Ok(((group_id, tp), Err(e)))) => {
                 warn!(
